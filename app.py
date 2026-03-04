@@ -11,20 +11,21 @@ SHEET_ID = "1wnY0u6EpmdeKJicCaH8SU8AT4Ble2CBpODK9dKrKLsw"
 def conectar_planilha():
     try:
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        # Puxa o JSON que você configurou no campo 'Secrets' do Streamlit
         creds_dict = st.secrets["gcp_service_account"]
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
+        # Retorna a aba 'viagens' (Sheet1)
         return client.open_by_key(SHEET_ID).sheet1
     except Exception as e:
         st.error(f"Erro de conexão: {e}")
         return None
 
-# Função para ler dados (usada nas abas de RH e Vouchers)
+# Função para ler dados em tempo real
 def carregar_dados():
     try:
         sheet = conectar_planilha()
         if sheet:
+            # get_all_records() garante que lemos o dado mais atualizado do Google
             df = pd.DataFrame(sheet.get_all_records())
             return df
         return pd.DataFrame()
@@ -68,24 +69,20 @@ with tab_colaborador:
             hoje = datetime.now().date()
             pode_prosseguir = True
             
-            # Validação de 24 horas
             if data_saida < hoje + timedelta(days=1):
                 st.error("❌ Bloqueado: A solicitação deve ter no mínimo 24h de antecedência.")
                 pode_prosseguir = False
             
-            # Validação de 20 dias para Avião
             if meio_transporte == "Avião" and data_saida < hoje + timedelta(days=20):
                 st.warning("⚠️ Alerta: Passagens aéreas exigem 20 dias de antecedência. O RH será notificado desta urgência.")
             
             if pode_prosseguir:
-                # Cálculo de diárias
                 dias = (data_volta - data_saida).days + 1
                 valor_diaria = 70.00
                 total_alimentacao = dias * valor_diaria
                 
                 try:
                     sheet = conectar_planilha()
-                    # AQUI ESTAVA O ERRO DE SINTAXE - AGORA FECHADO CORRETAMENTE
                     nova_linha = [
                         nome_colaborador, 
                         str(data_saida), 
@@ -102,18 +99,51 @@ with tab_colaborador:
                 except Exception as e:
                     st.error(f"Erro ao salvar na planilha: {e}")
 
-# --- ABA 2: PAINEL DO RH ---
+# --- ABA 2: PAINEL DO RH (AUTOMAÇÃO DE APROVAÇÃO) ---
 with tab_rh:
-    st.subheader("Pedidos Pendentes")
-    df_atual = carregar_dados()
+    st.subheader("Gestão de Pedidos")
+    df_rh = carregar_dados()
     
-    if df_atual.empty:
-        st.write("Não há dados na planilha ou ela está vazia.")
+    if df_rh.empty:
+        st.info("Não há solicitações registradas.")
     else:
-        st.dataframe(df_atual, use_container_width=True)
-        st.write("---")
-        st.write("👉 **Instrução para o RH:** Para aprovar, acesse a planilha diretamente e mude o status para 'Aprovado' e cole o link do Google Drive no campo 'link_voucher'.")
-        st.link_button("Abrir Planilha no Google Sheets", f"https://docs.google.com/spreadsheets/d/{SHEET_ID}")
+        # Filtramos apenas os pendentes para o RH agir
+        pendentes = df_rh[df_rh['status'] == "Pendente"]
+        
+        if pendentes.empty:
+            st.success("🎉 Todas as solicitações foram processadas!")
+        else:
+            st.write(f"Existem **{len(pendentes)}** pedidos aguardando sua análise.")
+            
+            for index, row in pendentes.iterrows():
+                # Criamos um cartão para cada pedido
+                with st.expander(f"🔔 Pedido de {row['nome']} - Destino: {row['endereco_obra']}"):
+                    st.write(f"📅 **Período:** {row['data_partida']} até {row['data_retorno']}")
+                    st.write(f"Transporte: **{row['meio_transporte']}**")
+                    
+                    # Formulário de aprovação específico para esta linha
+                    with st.form(key=f"form_rh_{index}"):
+                        novo_link = st.text_input("Cole aqui o link do Voucher (Google Drive)", placeholder="https://drive.google.com/...")
+                        col_btn1, col_btn2 = st.columns(2)
+                        
+                        aprovado = col_btn1.form_submit_button("✅ Aprovar e Salvar")
+                        negado = col_btn2.form_submit_button("❌ Negar Solicitação")
+                        
+                        if aprovado:
+                            sheet = conectar_planilha()
+                            # Somamos +2 pois o Sheets começa em 1 e tem o cabeçalho
+                            linha_index = index + 2 
+                            sheet.update_cell(linha_index, 6, "Aprovado") # Coluna F (Status)
+                            sheet.update_cell(linha_index, 7, novo_link)  # Coluna G (Voucher)
+                            st.success(f"Solicitação de {row['nome']} APROVADA!")
+                            st.rerun()
+                            
+                        if negado:
+                            sheet = conectar_planilha()
+                            linha_index = index + 2
+                            sheet.update_cell(linha_index, 6, "Negado")
+                            st.warning(f"Solicitação de {row['nome']} NEGADA.")
+                            st.rerun()
 
 # --- ABA 3: CONSULTA DE VOUCHERS ---
 with tab_vouchers:
@@ -122,17 +152,21 @@ with tab_vouchers:
     
     df_vouchers = carregar_dados()
     if not df_vouchers.empty and nome_busca:
-        # Busca o nome na coluna 'nome' ignorando maiúsculas/minúsculas
         filtro = df_vouchers[df_vouchers['nome'].astype(str).str.contains(nome_busca, case=False, na=False)]
         if not filtro.empty:
             for index, row in filtro.iterrows():
+                cor_status = "green" if row['status'] == "Aprovado" else "red" if row['status'] == "Negado" else "orange"
+                
                 with st.expander(f"Viagem para {row['endereco_obra']} - Status: {row['status']}"):
+                    st.markdown(f"Status: :{cor_status}[**{row['status']}**]")
                     st.write(f"**Transporte:** {row['meio_transporte']}")
                     st.write(f"**Saída:** {row['data_partida']} | **Retorno:** {row['data_retorno']}")
                     
-                    if not row['link_voucher'] or row['link_voucher'] == "":
-                        st.warning("Voucher ainda não disponível. Aguarde a compra pelo RH.")
-                    else:
+                    if row['status'] == "Aprovado" and row['link_voucher']:
                         st.link_button("📥 Baixar Voucher (Google Drive)", str(row['link_voucher']))
+                    elif row['status'] == "Negado":
+                        st.error("Esta solicitação foi negada pelo RH. Entre em contato para saber o motivo.")
+                    else:
+                        st.warning("Voucher ainda não disponível. Aguarde a compra pelo RH.")
         else:
             st.warning("Nenhuma viagem encontrada para este nome.")
