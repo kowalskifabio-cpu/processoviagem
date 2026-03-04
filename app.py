@@ -4,83 +4,83 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta
 
-# --- FUNÇÃO DE CONEXÃO ---
+# --- CONFIGURAÇÕES DE NEGÓCIO ---
+VALOR_DIARIA_ALIMENTACAO = 80.00  # Valor fixo para alimentação por dia
+ID_PLANILHA = "1wnY0u6EpmdeKJicCaH8SU8AT4Ble2CBpODK9dKrKLsw"
+
+# --- FUNÇÃO DE CONEXÃO COM GOOGLE SHEETS ---
 def conectar_planilha():
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds_dict = st.secrets["gcp_service_account"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    client = gspread.authorize(creds)
-    # Usando o ID da sua planilha fornecido
-    return client.open_by_key("1wnY0u6EpmdeKJicCaH8SU8AT4Ble2CBpODK9dKrKLsw").sheet1
+    try:
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        # Busca as credenciais configuradas no Secrets do Streamlit Cloud
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        return client.open_by_key(ID_PLANILHA).sheet1
+    except Exception as e:
+        st.error(f"Erro na conexão com a planilha: {e}")
+        return None
 
-# --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Workflow Viagens Marcenaria", layout="wide")
+# --- CONFIGURAÇÃO DA INTERFACE ---
+st.set_page_config(page_title="Workflow Viagens Marcenaria", layout="wide", page_icon="🚀")
 
-st.title("🪚 Fluxo de Viagens - Marcenaria")
+st.title("🪚 Sistema de Gestão de Viagens - Marcenaria")
 st.markdown("---")
 
-tab1, tab2 = st.tabs(["🚀 Solicitar Viagem", "📑 Painel Administrativo"])
+# Navegação por Abas
+tab_solicitacao, tab_rh, tab_vouchers = st.tabs([
+    "📝 Nova Solicitação", 
+    "⚖️ Painel de Aprovação (RH)", 
+    "📂 Meus Vouchers"
+])
 
-# --- ABA DE SOLICITAÇÃO ---
-with tab1:
+# --- ABA 1: SOLICITAÇÃO (COLABORADOR) ---
+with tab_solicitacao:
+    st.subheader("Registrar Pedido de Viagem")
+    
     with st.form("form_viagem", clear_on_submit=True):
-        st.subheader("Nova Solicitação")
         nome = st.text_input("Nome do Colaborador")
-        col1, col2 = st.columns(2)
         
+        col1, col2 = st.columns(2)
         with col1:
             data_partida = st.date_input("Data de Partida", min_value=datetime.now().date())
-            transporte = st.selectbox("Meio de Transporte", ["Veículo Próprio", "Ônibus", "Avião"])
+            meio_transporte = st.selectbox("Meio de Transporte", ["Veículo Empresa", "Ônibus", "Avião"])
         
         with col2:
             data_retorno = st.date_input("Data de Retorno", min_value=data_partida)
-            endereco_obra = st.text_input("Endereço da Obra")
-
-        enviar = st.form_submit_button("Enviar para RH")
+            endereco_obra = st.text_input("Endereço Completo da Obra (para reserva de hotel)")
+        
+        enviar = st.form_submit_button("Enviar para o RH")
 
         if enviar:
             hoje = datetime.now().date()
             erros = []
             
-            # Validação 24h
+            # Validação de 24 horas (Regra Geral)
             if data_partida < hoje + timedelta(days=1):
-                erros.append("❌ Solicitações gerais precisam de 24h de antecedência.")
+                erros.append("❌ Erro: Solicitações de viagem devem ter no mínimo 24h de antecedência.")
             
-            # Validação Avião 20 dias
-            if transporte == "Avião" and data_partida < hoje + timedelta(days=20):
-                erros.append("⚠️ Viagens aéreas exigem 20 dias de antecedência para emissão de passagens.")
-
+            # Validação de 20 dias (Regra Aéreo)
+            if meio_transporte == "Avião" and data_partida < hoje + timedelta(days=20):
+                erros.append("❌ Erro: Passagens aéreas exigem no mínimo 20 dias de antecedência.")
+            
             if erros:
                 for erro in erros:
                     st.error(erro)
             else:
-                try:
-                    sheet = conectar_planilha()
-                    # Organizando os dados para a planilha
+                sheet = conectar_planilha()
+                if sheet:
+                    # Cálculo de Diárias
+                    quantidade_dias = (data_retorno - data_partida).days + 1
+                    total_estimado = quantidade_dias * VALOR_DIARIA_ALIMENTACAO
+                    
+                    # Preparação da linha para o Google Sheets
                     nova_linha = [
                         nome, 
                         str(data_partida), 
                         str(data_retorno), 
-                        transporte, 
+                        meio_transporte, 
                         endereco_obra, 
-                        "Pendente", # Status para o RH alterar
-                        ""          # Espaço para o link do Voucher
-                    ]
-                    sheet.append_row(nova_linha)
-                    st.success("✅ Solicitação enviada! O RH analisará seu pedido.")
-                except Exception as e:
-                    st.error(f"Erro ao salvar na planilha: {e}")
-
-# --- ABA DE CONSULTA ---
-with tab2:
-    st.subheader("Status de Viagens e Vouchers")
-    try:
-        sheet = conectar_planilha()
-        # Lê todos os dados da planilha e transforma em tabela
-        dados = pd.DataFrame(sheet.get_all_records())
-        if not dados.empty:
-            st.dataframe(dados, use_container_width=True)
-        else:
-            st.info("Nenhuma solicitação encontrada.")
-    except Exception as e:
-        st.error("Erro ao carregar dados. Verifique se a planilha tem cabeçalhos na primeira linha.")
+                        "Pendente",         # Status inicial
+                        "",                 # Campo para link do voucher (vazio)
+                        total_estimado      # Valor calculado
